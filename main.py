@@ -4,4 +4,4 @@ from wazuh import Wazuh_Importer
 
 Wazuh = Wazuh_Importer()
 
-Wazuh.get_findings(group="Clients_AAAA", filedestination=".")
+Wazuh.get_findings(group="Clients_AAAA", filedestination="")

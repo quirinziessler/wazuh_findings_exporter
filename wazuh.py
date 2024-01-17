@@ -75,7 +75,11 @@ class Wazuh_Importer(object):
         authenticate()
 
     def get_findings(self, group, filedestination):
-        vulnerabilities_list = []
+        vulnerabilities_list = {
+            "data": {
+                "affected_items": []
+            }
+        }
 
         group_agents = get_agents_in_group(group)
 
@@ -87,6 +91,7 @@ class Wazuh_Importer(object):
         common_ids = set(group_agents_data.keys())
 
         # Loop through each agent_id and get its vulnerabilities
+        vulncount = 0
         for agent_id in common_ids:
             vulnerabilities = get_vulnerabilities_for_agent(agent_id)
             if vulnerabilities:
@@ -100,9 +105,11 @@ class Wazuh_Importer(object):
                         vulnerability["agent_ip"] = group_agents_data[agent_id]
                         vulnerability["agent_name"] = group_agents_name[agent_id]
                         filtered_vulnerabilities.append(vulnerability)
+                        vulncount += 1
                 if filtered_vulnerabilities != []:
-                    vulnerabilities["data"]["affected_items"] = filtered_vulnerabilities
-                    vulnerabilities_list.append(vulnerabilities)
+                    vulnerabilities_list["data"]["affected_items"] += filtered_vulnerabilities
+
+        vulnerabilities_list["data"]["total_affected_items"] = vulncount
 
             # Write the filtered vulnerabilities to a JSON file
         with open(filedestination + "wazuh.json", "wt", encoding="utf-8") as f:
