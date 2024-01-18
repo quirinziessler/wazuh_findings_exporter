@@ -2,7 +2,7 @@ from distutils.core import setup
 setup(
   name = 'wazuh_findings_exporter',
   packages = ['wazuh_findings_exporter'],
-  version = '1.0',
+  version = '1.1',
   license='MIT',
   description = 'Simple script that exports Wazuh Vulnerabilities by Agent groups',
   author = 'Quirin Hardy Zießler',
@@ -15,10 +15,8 @@ setup(
           'requests',
       ],
   classifiers=[
-    '5 - Production/Stable',
     'Intended Audience :: Developers',
     'Topic :: Software Development :: Build Tools',
-    'MIT License',
     'Programming Language :: Python :: 3',
     'Programming Language :: Python :: 3.6',
     'Programming Language :: Python :: 3.7',
