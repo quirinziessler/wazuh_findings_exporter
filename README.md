@@ -8,6 +8,8 @@ The script may not be perfect, so feel free to provide PRs and help to improve i
 
     from wazuh_findings_exporter import Wazuh_Importer
 
-    Wazuh = Wazuh_Importer(BASE_URL=None, BASE_URL=None, BASE_URL=None)
+    Wazuh = Wazuh_Importer(BASE_URL=None, USERNAME=None, PASSWORD=None)
 
     Wazuh.get_findings(group="Clients_AAAA", filedestination="")
+
+# TODO: Update README with new examples

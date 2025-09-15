@@ -1,7 +1,10 @@
-''' Just a demo on how the wazuh.py file could be integrated '''
+"""Just a demo on how the wazuh.py file could be integrated"""
 
-import wazuh_findings_exporter import Wazuh_Importer
+from wazuh_findings_exporter import Wazuh_Importer
 
-Wazuh = Wazuh_Importer(BASE_URL=None, BASE_URL=None, BASE_URL=None)
+Wazuh = Wazuh_Importer(BASE_URL=None, USERNAME=None, PASSWORD=None)
 
 Wazuh.get_findings(group="Clients_AAAA", filedestination="")
+
+
+# TODO: Update this example
