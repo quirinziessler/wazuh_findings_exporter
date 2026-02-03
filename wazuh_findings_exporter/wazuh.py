@@ -2,7 +2,6 @@
 
 
 import logging
-import coloredlogs
 import requests
 import urllib3
 import json
@@ -16,19 +15,16 @@ from requests.exceptions import (
     ConnectionError,
     RequestException,
 )
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Sequence
 from packaging import version
 from pathlib import Path
 
-# TODO: Add proper docstrings for all public and private functions, describing arguments, return values, and exceptions.
-# TODO: Update type annotations throughout the class for clarity and mypy compatibility.
 # TODO: Implement unit tests for new methods, especially for OpenSearch-based methods and API version >= 4.8 functionality.
 # TODO: Update package to version 2.0 with major refactoring and new features while keeping Wazuh API 4.7 compatibility
 
 log_format = (
     "%(asctime)s - [%(module)s::%(funcName)s::%(lineno)d] - %(levelname)s - %(message)s"
 )
-coloredlogs.install(level="INFO", fmt=log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
 logging.captureWarnings(True)
 logger = logging.getLogger(__name__)
@@ -42,44 +38,56 @@ class Wazuh_Importer(object):
         BASE_URL: str,
         USERNAME: str,
         PASSWORD: str,
-        OPENSEARCH_USERNAME="",
-        OPENSEARCH_PASSWORD="",
-        OPENSEARCH_HOST="",
-        OPENSEARCH_PORT=9200,
-        verify=False,
-        timeout=10,
-        elasticsearch_index="wazuh-states-vulnerabilities-*",
+        OPENSEARCH_USERNAME: str = "",
+        OPENSEARCH_PASSWORD: str = "",
+        OPENSEARCH_HOST: str = "",
+        OPENSEARCH_PORT: int = 9200,
+        verify: bool = False,
+        timeout: float = 10,
+        elasticsearch_index: str = "wazuh-states-vulnerabilities-*",
         logger: Optional[logging.Logger] = None,
         disable_insecure_request_warnings: bool = True,
-    ):
+    ) -> None:
         """
-        Initialize Wazuh importer.
+        Initialize the Wazuh importer and optionally the OpenSearch client.
 
         Args:
             BASE_URL (str): Base URL of the Wazuh API endpoint.
             USERNAME (str): Wazuh username.
             PASSWORD (str): Wazuh password.
-            OPENSEARCH_USERNAME (str): Wazuh Opensearch username.
-            OPENSEARCH_PASSWORD (str): Wazuh Opensearch password.
-            verify (bool): Enable or disable SSL verification.
+            OPENSEARCH_USERNAME (str): OpenSearch username (Wazuh 4.8+).
+            OPENSEARCH_PASSWORD (str): OpenSearch password (Wazuh 4.8+).
+            OPENSEARCH_HOST (str): OpenSearch host.
+            OPENSEARCH_PORT (int): OpenSearch port.
+            verify (bool): Enable or disable SSL certificate verification.
             timeout (int | float): Request timeout in seconds.
+            elasticsearch_index (str): OpenSearch index pattern for vulnerabilities.
+            logger (logging.Logger | None): Logger instance to use.
+            disable_insecure_request_warnings (bool): Suppress insecure request warnings.
+
+        Returns:
+            None.
+
+        Raises:
+            Exception: Propagates any unexpected error while initializing the OpenSearch
+                client.
         """
 
-        self.logger = logger or logging.getLogger(__name__)
-        self.BASE_URL = BASE_URL
-        self.AUTH_URL = f"{BASE_URL}/security/user/authenticate?raw=true"
-        self.USERNAME = USERNAME
-        self.PASSWORD = PASSWORD
-        self.OPENSEARCH_USERNAME = OPENSEARCH_USERNAME
-        self.OPENSEARCH_PASSWORD = OPENSEARCH_PASSWORD
-        self.OPENSEARCH_HOST = OPENSEARCH_HOST
-        self.OPENSEARCH_PORT = OPENSEARCH_PORT
-        self.HEADERS = {}
-        self.verify = verify
-        self.timeout = timeout
-        self.elasticsearch_index = elasticsearch_index
-        self.wazuh_api_version = None
-        self.opensearch_client = None
+        self.logger: logging.Logger = logger or logging.getLogger(__name__)
+        self.BASE_URL: str = BASE_URL
+        self.AUTH_URL: str = f"{BASE_URL}/security/user/authenticate?raw=true"
+        self.USERNAME: str = USERNAME
+        self.PASSWORD: str = PASSWORD
+        self.OPENSEARCH_USERNAME: str = OPENSEARCH_USERNAME
+        self.OPENSEARCH_PASSWORD: str = OPENSEARCH_PASSWORD
+        self.OPENSEARCH_HOST: str = OPENSEARCH_HOST
+        self.OPENSEARCH_PORT: int = OPENSEARCH_PORT
+        self.HEADERS: Dict[str, str] = {}
+        self.verify: bool = verify
+        self.timeout: float = timeout
+        self.elasticsearch_index: str = elasticsearch_index
+        self.wazuh_api_version: Optional[str] = None
+        self.opensearch_client: Optional[OpenSearch] = None
 
         if disable_insecure_request_warnings:
             self._disable_insecure_request_warnings()
@@ -98,7 +106,19 @@ class Wazuh_Importer(object):
                 verify_certs=self.verify,
             )
 
-    def _disable_insecure_request_warnings(self):
+    def _disable_insecure_request_warnings(self) -> None:
+        """
+        Suppress warnings about insecure HTTPS requests.
+
+        Args:
+            None.
+
+        Returns:
+            None.
+
+        Raises:
+            None.
+        """
         warnings.filterwarnings(
             "ignore",
             category=UserWarning,
@@ -110,8 +130,14 @@ class Wazuh_Importer(object):
         """
         Retrieve Wazuh API version.
 
+        Args:
+            None.
+
         Returns:
             str | None: API version string if successful, otherwise None.
+
+        Raises:
+            None. Errors are logged and the method returns None on failure.
         """
         endpoint = f"{self.BASE_URL}/manager/info"
 
@@ -160,8 +186,14 @@ class Wazuh_Importer(object):
         """
         Authenticate against the Wazuh API and set the Bearer token.
 
+        Args:
+            None.
+
         Returns:
             bool: True if authentication succeeded, False otherwise.
+
+        Raises:
+            None. Errors are logged and the method returns False on failure.
         """
         try:
             response = requests.get(
@@ -205,6 +237,9 @@ class Wazuh_Importer(object):
 
         Returns:
             list: List of agent objects, or [] if request fails.
+
+        Raises:
+            None. Errors are logged and the method returns [] on failure.
         """
         endpoint = f"{self.BASE_URL}/groups/{group}/agents"
         params = {"limit": 100000}
@@ -274,6 +309,9 @@ class Wazuh_Importer(object):
 
         Returns:
             dict | None: Vulnerability data, or None if request fails.
+
+        Raises:
+            None. Errors are logged and the method returns None on failure.
         """
         endpoint = f"{self.BASE_URL}/vulnerability/{agent_id}"
         params = {"limit": 100000}
@@ -321,19 +359,19 @@ class Wazuh_Importer(object):
                 )
                 return None
 
-        except requests.exceptions.ConnectTimeout as e:
+        except ConnectTimeout as e:
             self.logger.error(
                 f"Connection timed out while fetching vulnerabilities for agent '{agent_id}': {e}"
             )
-        except requests.exceptions.ReadTimeout as e:
+        except ReadTimeout as e:
             self.logger.error(
                 f"Read timed out while fetching vulnerabilities for agent '{agent_id}': {e}"
             )
-        except requests.exceptions.ConnectionError as e:
+        except ConnectionError as e:
             self.logger.error(
                 f"Connection error while fetching vulnerabilities for agent '{agent_id}': {e}"
             )
-        except requests.exceptions.RequestException as e:
+        except RequestException as e:
             self.logger.error(
                 f"Unexpected request error while fetching vulnerabilities for agent '{agent_id}': {e}"
             )
@@ -345,16 +383,19 @@ class Wazuh_Importer(object):
         return None
 
     def get_vulnerabilities_for_group_of_agents_4_8_plus(
-        self, agent_ids: List[str]
+        self, agent_ids: Sequence[str]
     ) -> Dict[str, Any]:
         """
         Retrieve vulnerabilities for a group of agents (Wazuh API >= 4.8).
 
         Args:
-            agent_id (str): Wazuh agent ID.
+            agent_ids (list[str]): Wazuh agent IDs.
 
         Returns:
-            dict | None: Vulnerability data, or None if request fails.
+            dict: OpenSearch response payload, or an empty dict on failure.
+
+        Raises:
+            None. Errors are logged and the method returns {} on failure.
         """
 
         query = {
@@ -372,7 +413,11 @@ class Wazuh_Importer(object):
                 }
             }
         }
-        response = {}
+        if self.opensearch_client is None:
+            self.logger.error("OpenSearch client is not configured.")
+            return {}
+
+        response: Dict[str, Any] = {}
 
         try:
             response = self.opensearch_client.search(
@@ -391,7 +436,7 @@ class Wazuh_Importer(object):
 
     def get_findings(
         self, group: str, filedestination: str, filename: str = "wazuh.json"
-    ) -> str:
+    ) -> Path:
         """
         Retrieve vulnerabilities for all agents in a group and save to JSON.
 
@@ -402,6 +447,9 @@ class Wazuh_Importer(object):
 
         Returns:
             Path: Path to the saved JSON file.
+
+        Raises:
+            OSError: If the destination directory cannot be created.
         """
         Path(filedestination).mkdir(parents=True, exist_ok=True)
         output_file = Path(filedestination) / filename
