@@ -3,7 +3,7 @@ from distutils.core import setup
 setup(
     name="wazuh_findings_exporter",
     packages=["wazuh_findings_exporter"],
-    version="1.1",
+    version="2.0",
     license="MIT",
     description="Simple script that exports Wazuh Vulnerabilities by Agent groups",
     author="Quirin Hardy Zießler",
@@ -14,6 +14,7 @@ setup(
     install_requires=[
         "urllib3",
         "requests",
+        "opensearch-py",
     ],
     classifiers=[
         "Intended Audience :: Developers",

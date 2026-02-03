@@ -19,8 +19,6 @@ from typing import Optional, Dict, List, Any, Sequence
 from packaging import version
 from pathlib import Path
 
-# TODO: Update package to version 2.0 with major refactoring and new features while keeping Wazuh API 4.7 compatibility
-
 log_format = (
     "%(asctime)s - [%(module)s::%(funcName)s::%(lineno)d] - %(levelname)s - %(message)s"
 )
@@ -93,10 +91,11 @@ class Wazuh_Importer(object):
         self.authenticate()
         self._get_api_version()
 
+        api_version = self.wazuh_api_version or "0.0.0"
         if (
             OPENSEARCH_USERNAME
             and OPENSEARCH_PASSWORD
-            and version.parse(self.wazuh_api_version) >= version.parse("4.8.0")
+            and version.parse(api_version) >= version.parse("4.8.0")
         ):
             self.opensearch_client = OpenSearch(
                 hosts=[{"host": self.OPENSEARCH_HOST, "port": self.OPENSEARCH_PORT}],
@@ -454,9 +453,11 @@ class Wazuh_Importer(object):
         output_file = Path(filedestination) / filename
         group_agents = self.get_agents_in_group(group)
 
-        if version.parse(self.wazuh_api_version) < version.parse("4.8.0"):
+        api_version = self.wazuh_api_version or "0.0.0"
+        vulnerabilities_list: Dict[str, Any]
+        if version.parse(api_version) < version.parse("4.8.0"):
             vulnerabilities_list = {"data": {"affected_items": []}}
-            vulncount = 0
+            vulncount: int = 0
 
             # Build lookup tables for IPs and names
             group_agents_data = {agent["id"]: agent.get("ip") for agent in group_agents}
@@ -486,7 +487,11 @@ class Wazuh_Importer(object):
             vulnerabilities_list["data"]["total_affected_items"] = vulncount
 
         else:
-            agent_ids = [agent.get("id") for agent in group_agents]
+            agent_ids: List[str] = []
+            for agent in group_agents:
+                agent_id = agent.get("id")
+                if isinstance(agent_id, str):
+                    agent_ids.append(agent_id)
             vulnerabilities_list = (
                 self.get_vulnerabilities_for_group_of_agents_4_8_plus(
                     agent_ids=agent_ids
