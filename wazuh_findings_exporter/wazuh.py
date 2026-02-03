@@ -19,7 +19,6 @@ from typing import Optional, Dict, List, Any, Sequence
 from packaging import version
 from pathlib import Path
 
-# TODO: Implement unit tests for new methods, especially for OpenSearch-based methods and API version >= 4.8 functionality.
 # TODO: Update package to version 2.0 with major refactoring and new features while keeping Wazuh API 4.7 compatibility
 
 log_format = (
