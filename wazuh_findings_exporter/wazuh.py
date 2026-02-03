@@ -15,7 +15,7 @@ from requests.exceptions import (
     ConnectionError,
     RequestException,
 )
-from typing import Optional, Dict, List, Any, Sequence
+from typing import Optional, Dict, List, Any, Sequence, Union, Iterable
 from packaging import version
 from pathlib import Path
 
@@ -23,12 +23,19 @@ log_format = (
     "%(asctime)s - [%(module)s::%(funcName)s::%(lineno)d] - %(levelname)s - %(message)s"
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - [%(module)s::%(funcName)s::%(lineno)d] - %(levelname)s - %(message)s",
+)
+
 logging.captureWarnings(True)
-logger = logging.getLogger(__name__)
 
 
 class Wazuh_Importer(object):
     """API exporter for Wazuh."""
+
+    DEFAULT_HITS_PER_FILE = 100000
+    VALID_OUTPUT_MODES = {"single", "split"}
 
     def __init__(
         self,
@@ -42,6 +49,7 @@ class Wazuh_Importer(object):
         verify: bool = False,
         timeout: float = 10,
         elasticsearch_index: str = "wazuh-states-vulnerabilities-*",
+        output_mode: str = "single",
         logger: Optional[logging.Logger] = None,
         disable_insecure_request_warnings: bool = True,
     ) -> None:
@@ -59,6 +67,7 @@ class Wazuh_Importer(object):
             verify (bool): Enable or disable SSL certificate verification.
             timeout (int | float): Request timeout in seconds.
             elasticsearch_index (str): OpenSearch index pattern for vulnerabilities.
+            output_mode (str): Output mode: "single" (default) or "split".
             logger (logging.Logger | None): Logger instance to use.
             disable_insecure_request_warnings (bool): Suppress insecure request warnings.
 
@@ -83,8 +92,15 @@ class Wazuh_Importer(object):
         self.verify: bool = verify
         self.timeout: float = timeout
         self.elasticsearch_index: str = elasticsearch_index
+        self.output_mode: str = output_mode.strip().lower()
         self.wazuh_api_version: Optional[str] = None
         self.opensearch_client: Optional[OpenSearch] = None
+
+        if self.output_mode not in self.VALID_OUTPUT_MODES:
+            self.logger.warning(
+                f"Unknown output_mode '{output_mode}'. Falling back to 'single'."
+            )
+            self.output_mode = "single"
 
         if disable_insecure_request_warnings:
             self._disable_insecure_request_warnings()
@@ -396,21 +412,6 @@ class Wazuh_Importer(object):
             None. Errors are logged and the method returns {} on failure.
         """
 
-        query = {
-            "query": {
-                "bool": {
-                    "must": [{"terms": {"agent.id": agent_ids}}],
-                    "should": [
-                        {"match": {"vulnerability.severity": "Critical"}},
-                        {"match": {"vulnerability.severity": "High"}},
-                        {"match": {"vulnerability.severity": "Medium"}},
-                        {"match": {"vulnerability.severity": "Low"}},
-                        {"match": {"vulnerability.severity": ""}},
-                    ],
-                    "minimum_should_match": 1,
-                }
-            }
-        }
         if self.opensearch_client is None:
             self.logger.error("OpenSearch client is not configured.")
             return {}
@@ -418,8 +419,8 @@ class Wazuh_Importer(object):
         response: Dict[str, Any] = {}
 
         try:
-            response = self.opensearch_client.search(
-                body=query, index=self.elasticsearch_index
+            response = self.get_vulnerabilities_for_group_of_agents_4_8_plus_page(
+                agent_ids=agent_ids, scroll_id=None
             )
         except AuthenticationException:
             self.logger.error("Received 401 Unauthorized.")
@@ -430,11 +431,299 @@ class Wazuh_Importer(object):
                 f"Unexpected error while fetching group '{agent_ids}': {e}"
             )
 
+        if response["hits"]["total"]["value"] <= 10000:
+            return response
+
+        total_hits = response["hits"]["total"]["value"]
+        self.logger.info(f"Total hits - {total_hits}. Start scrolling...")
+        scroll_id: str = response["_scroll_id"]
+
+        while True:
+            self.logger.info("Scrolling next 10000 hits")
+            try:
+                scroll_response = (
+                    self.get_vulnerabilities_for_group_of_agents_4_8_plus_page(
+                        agent_ids=agent_ids, scroll_id=scroll_id
+                    )
+                )
+                hits = scroll_response["hits"]["hits"]
+                if not hits:
+                    self.logger.info("Ending scrolling")
+                    break
+                response["hits"]["hits"].extend(hits)
+            except AuthenticationException:
+                self.logger.error("Received 401 Unauthorized.")
+                break
+            except RequestError as re:
+                self.logger.error(f"Received 400: {re}")
+                break
+            except Exception as e:
+                self.logger.error(
+                    f"Unexpected error while fetching group '{agent_ids}': {e}"
+                )
+                break
+
+        try:
+            self.logger.info("Clearing scroll")
+            self.opensearch_client.clear_scroll(scroll_id=scroll_id)
+        except AuthenticationException:
+            self.logger.error("Received 401 Unauthorized.")
+        except RequestError as re:
+            self.logger.error(f"Received 400: {re}")
+        except Exception as e:
+            self.logger.error(
+                f"Unexpected error while clearing scroll '{scroll_id}': {e}"
+            )
+
         return response
+
+    def get_vulnerabilities_for_group_of_agents_4_8_plus_page(
+        self, agent_ids: Sequence[str], scroll_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Retrieve one page of vulnerabilities (initial or scroll).
+
+        Args:
+            agent_ids (list[str]): Wazuh agent IDs.
+            scroll_id (str | None): Scroll ID for subsequent requests.
+
+        Returns:
+            dict: OpenSearch response payload, or an empty dict on failure.
+        """
+        if self.opensearch_client is None:
+            self.logger.error("OpenSearch client is not configured.")
+            return {}
+
+        if scroll_id:
+            return self._opensearch_scroll_next(scroll_id)
+
+        return self._opensearch_search_initial(agent_ids)
+
+    def _opensearch_search_initial(self, agent_ids: Sequence[str]) -> Dict[str, Any]:
+        if self.opensearch_client is None:
+            raise RuntimeError("OpenSearch client is not configured.")
+        query = {
+            "query": {
+                "bool": {
+                    "must": [{"terms": {"agent.id": agent_ids}}],
+                    "should": [
+                        {"match": {"vulnerability.severity": "Critical"}},
+                        {"match": {"vulnerability.severity": "High"}},
+                        {"match": {"vulnerability.severity": "Medium"}},
+                        {"match": {"vulnerability.severity": "Low"}},
+                    ],
+                }
+            }
+        }
+        return self.opensearch_client.search(
+            body=query, index=self.elasticsearch_index, scroll="1m", size=10000
+        )
+
+    def _opensearch_scroll_next(self, scroll_id: str) -> Dict[str, Any]:
+        if self.opensearch_client is None:
+            raise RuntimeError("OpenSearch client is not configured.")
+        return self.opensearch_client.scroll(scroll_id=scroll_id, scroll="1m")
+
+    def _chunked(self, items: Sequence[Any], chunk_size: int) -> Iterable[List[Any]]:
+        for i in range(0, len(items), chunk_size):
+            yield list(items[i : i + chunk_size])
+
+    def _chunk_output_path(self, output_file: Path, part_index: int) -> Path:
+        stem = output_file.stem
+        suffix = output_file.suffix
+        return output_file.with_name(f"{stem}_{part_index:04d}{suffix}")
+
+    def _write_json_file(self, output_file: Path, payload: Dict[str, Any]) -> None:
+        try:
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            self.logger.info(f"Wazuh vulnerabilities saved to: {output_file}")
+        except OSError as e:
+            self.logger.error(f"Failed to write results to {output_file}: {e}")
+
+    def _write_split_findings(
+        self,
+        output_file: Path,
+        vulnerabilities_list: Dict[str, Any],
+        api_version: str,
+    ) -> List[Path]:
+        output_files: List[Path] = []
+
+        if version.parse(api_version) < version.parse("4.8.0"):
+            data_section = vulnerabilities_list.get("data", {})
+            affected_items = data_section.get("affected_items", [])
+            if not isinstance(affected_items, list):
+                affected_items = []
+            total_items = data_section.get("total_affected_items", len(affected_items))
+
+            for index, chunk in enumerate(
+                self._chunked(affected_items, self.DEFAULT_HITS_PER_FILE), start=1
+            ):
+                payload = {
+                    "data": {
+                        "affected_items": chunk,
+                        "total_affected_items": total_items,
+                    }
+                }
+                chunk_file = self._chunk_output_path(output_file, index)
+                self._write_json_file(chunk_file, payload)
+                output_files.append(chunk_file)
+
+            if not output_files:
+                chunk_file = self._chunk_output_path(output_file, 1)
+                payload = {
+                    "data": {
+                        "affected_items": [],
+                        "total_affected_items": total_items,
+                    }
+                }
+                self._write_json_file(chunk_file, payload)
+                output_files.append(chunk_file)
+
+            return output_files
+
+        if not vulnerabilities_list or "hits" not in vulnerabilities_list:
+            self._write_json_file(output_file, vulnerabilities_list)
+            return [output_file]
+
+        hits_section = vulnerabilities_list.get("hits", {})
+        hits = hits_section.get("hits", [])
+        if not isinstance(hits, list):
+            hits = []
+
+        base_payload = {
+            key: value for key, value in vulnerabilities_list.items() if key != "hits"
+        }
+        base_hits = {key: value for key, value in hits_section.items() if key != "hits"}
+
+        for index, chunk in enumerate(
+            self._chunked(hits, self.DEFAULT_HITS_PER_FILE), start=1
+        ):
+            payload = dict(base_payload)
+            payload_hits = dict(base_hits)
+            payload_hits["hits"] = chunk
+            payload["hits"] = payload_hits
+            chunk_file = self._chunk_output_path(output_file, index)
+            self._write_json_file(chunk_file, payload)
+            output_files.append(chunk_file)
+
+        if not output_files:
+            chunk_file = self._chunk_output_path(output_file, 1)
+            self._write_json_file(chunk_file, vulnerabilities_list)
+            output_files.append(chunk_file)
+
+        return output_files
+
+    def _write_split_findings_streaming_4_8_plus(
+        self, output_file: Path, agent_ids: Sequence[str]
+    ) -> List[Path]:
+        output_files: List[Path] = []
+        buffer_hits: List[Any] = []
+        base_payload: Optional[Dict[str, Any]] = None
+        base_hits: Optional[Dict[str, Any]] = None
+        part_index = 1
+        scroll_id: Optional[str] = None
+        latest_scroll_id: Optional[str] = None
+        total_hits: Optional[int] = None
+        is_first = True
+
+        try:
+            while True:
+                try:
+                    response = (
+                        self.get_vulnerabilities_for_group_of_agents_4_8_plus_page(
+                            agent_ids=agent_ids, scroll_id=scroll_id
+                        )
+                    )
+                except AuthenticationException:
+                    self.logger.error("Received 401 Unauthorized.")
+                    break
+                except RequestError as re:
+                    self.logger.error(f"Received 400: {re}")
+                    break
+                except Exception as e:
+                    self.logger.error(
+                        f"Unexpected error while fetching group '{agent_ids}': {e}"
+                    )
+                    break
+                if not response:
+                    break
+
+                latest_scroll_id = response.get("_scroll_id", latest_scroll_id)
+                hits_section = response.get("hits", {})
+                hits = hits_section.get("hits", [])
+                if not isinstance(hits, list):
+                    hits = []
+
+                if is_first:
+                    base_payload = {
+                        key: value for key, value in response.items() if key != "hits"
+                    }
+                    base_hits = {
+                        key: value
+                        for key, value in hits_section.items()
+                        if key != "hits"
+                    }
+                    total_hits = (hits_section.get("total", {}) or {}).get("value")
+                    if total_hits is not None and len(hits) < total_hits:
+                        self.logger.info(
+                            f"Total hits - {total_hits}. Start scrolling..."
+                        )
+
+                if not hits:
+                    break
+
+                buffer_hits.extend(hits)
+                while len(buffer_hits) >= self.DEFAULT_HITS_PER_FILE:
+                    chunk = buffer_hits[: self.DEFAULT_HITS_PER_FILE]
+                    buffer_hits = buffer_hits[self.DEFAULT_HITS_PER_FILE :]
+                    payload = dict(base_payload or {})
+                    payload_hits = dict(base_hits or {})
+                    payload_hits["hits"] = chunk
+                    payload["hits"] = payload_hits
+                    chunk_file = self._chunk_output_path(output_file, part_index)
+                    self._write_json_file(chunk_file, payload)
+                    output_files.append(chunk_file)
+                    part_index += 1
+
+                if is_first and total_hits is not None and len(hits) >= total_hits:
+                    scroll_id = latest_scroll_id
+                    break
+
+                scroll_id = latest_scroll_id
+                is_first = False
+        finally:
+            if latest_scroll_id and self.opensearch_client is not None:
+                try:
+                    self.logger.info("Clearing scroll")
+                    self.opensearch_client.clear_scroll(scroll_id=latest_scroll_id)
+                except AuthenticationException:
+                    self.logger.error("Received 401 Unauthorized.")
+                except RequestError as re:
+                    self.logger.error(f"Received 400: {re}")
+                except Exception as e:
+                    self.logger.error(
+                        f"Unexpected error while clearing scroll '{latest_scroll_id}': {e}"
+                    )
+
+        if base_payload is None:
+            self._write_json_file(output_file, {})
+            return [output_file]
+
+        if buffer_hits or not output_files:
+            payload = dict(base_payload or {})
+            payload_hits = dict(base_hits or {})
+            payload_hits["hits"] = buffer_hits
+            payload["hits"] = payload_hits
+            chunk_file = self._chunk_output_path(output_file, part_index)
+            self._write_json_file(chunk_file, payload)
+            output_files.append(chunk_file)
+
+        return output_files
 
     def get_findings(
         self, group: str, filedestination: str, filename: str = "wazuh.json"
-    ) -> Path:
+    ) -> Union[Path, List[Path]]:
         """
         Retrieve vulnerabilities for all agents in a group and save to JSON.
 
@@ -444,10 +733,13 @@ class Wazuh_Importer(object):
             filename (str): JSON filename.
 
         Returns:
-            Path: Path to the saved JSON file.
+            Path | list[Path]: Path(s) to the saved JSON file(s).
 
         Raises:
             OSError: If the destination directory cannot be created.
+
+        Notes:
+            When output_mode is "split", results are written in chunks of 100000 hits.
         """
         Path(filedestination).mkdir(parents=True, exist_ok=True)
         output_file = Path(filedestination) / filename
@@ -492,18 +784,23 @@ class Wazuh_Importer(object):
                 agent_id = agent.get("id")
                 if isinstance(agent_id, str):
                     agent_ids.append(agent_id)
+            if self.output_mode == "split":
+                return self._write_split_findings_streaming_4_8_plus(
+                    output_file=output_file, agent_ids=agent_ids
+                )
             vulnerabilities_list = (
                 self.get_vulnerabilities_for_group_of_agents_4_8_plus(
                     agent_ids=agent_ids
                 )
             )
 
-        # Save results
-        try:
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(vulnerabilities_list, f, indent=2)
-            self.logger.info(f"Wazuh vulnerabilities saved to: {output_file}")
-        except OSError as e:
-            self.logger.error(f"Failed to write results to {output_file}: {e}")
+        if self.output_mode == "split":
+            return self._write_split_findings(
+                output_file=output_file,
+                vulnerabilities_list=vulnerabilities_list,
+                api_version=api_version,
+            )
+
+        self._write_json_file(output_file, vulnerabilities_list)
 
         return output_file
