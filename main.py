@@ -22,7 +22,7 @@ importer = Wazuh_Importer(
     OPENSEARCH_PASSWORD=OS_PASS,
     OPENSEARCH_HOST=OS_HOST,
     OPENSEARCH_PORT=OS_PORT,
-    output_mode="split",
+    output_mode="split",  # For Wazuh 4.8+
     verify=False,
     timeout=30,
 )

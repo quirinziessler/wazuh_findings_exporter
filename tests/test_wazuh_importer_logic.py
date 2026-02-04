@@ -328,77 +328,93 @@ def test_get_vulnerabilities_for_agent_exception_returns_none(exc):
         assert importer.get_vulnerabilities_for_agent("001") is None
 
 
-def test_get_vulnerabilities_for_group_of_agents_4_8_plus_page_routes():
+def test_get_scroll_page_routes_initial_and_scroll():
     importer = _make_importer(api_version="4.8.0")
-    importer.opensearch_client = Mock()
-    importer.opensearch_client.search.return_value = {"ok": True}
-    importer.opensearch_client.scroll.return_value = {"scroll": True}
-
-    initial = importer.get_vulnerabilities_for_group_of_agents_4_8_plus_page(
-        agent_ids=["001"]
-    )
-    scroll = importer.get_vulnerabilities_for_group_of_agents_4_8_plus_page(
-        agent_ids=["001"], scroll_id="abc"
-    )
+    with (
+        patch.object(
+            importer, "_opensearch_search_initial", return_value={"ok": True}
+        ) as mock_initial,
+        patch.object(
+            importer, "_opensearch_scroll_next", return_value={"scroll": True}
+        ) as mock_scroll,
+    ):
+        initial = importer._get_scroll_page(agent_ids=["001"])
+        scroll = importer._get_scroll_page(scroll_id="abc")
 
     assert initial == {"ok": True}
     assert scroll == {"scroll": True}
-    importer.opensearch_client.search.assert_called_once()
-    importer.opensearch_client.scroll.assert_called_once_with(
-        scroll_id="abc", scroll="1m"
-    )
+    mock_initial.assert_called_once_with(["001"])
+    mock_scroll.assert_called_once_with("abc")
 
 
-def test_get_vulnerabilities_for_group_of_agents_4_8_plus_without_client():
+def test_get_scroll_page_requires_params():
+    importer = _make_importer(api_version="4.8.0")
+    with pytest.raises(RuntimeError):
+        importer._get_scroll_page()
+
+
+def test_get_vulnerabilities_for_group_of_agents_4_8_plus_without_client_raises():
     importer = _make_importer(api_version="4.8.0")
     importer.opensearch_client = None
-    response = importer.get_vulnerabilities_for_group_of_agents_4_8_plus_page(
-        agent_ids=["001"]
-    )
-    assert response == {}
+    with pytest.raises(RuntimeError):
+        importer.get_vulnerabilities_for_group_of_agents_4_8_plus(agent_ids=["001"])
 
 
-def test_get_vulnerabilities_for_group_of_agents_4_8_plus_scrolling_extends_hits():
+def test_get_vulnerabilities_for_group_of_agents_4_8_plus_single_merges_hits(tmp_path):
     importer = _make_importer(api_version="4.8.0")
     importer.opensearch_client = Mock()
-    initial = {
+    importer.output_mode = "single"
+    output_file = tmp_path / "wazuh.json"
+
+    first_page = {
         "_scroll_id": "s1",
-        "hits": {"total": {"value": 10001}, "hits": [{"_id": "1"}]},
+        "hits": {"total": {"value": 3}, "hits": [{"_id": "1"}]},
     }
-    next_page = {"_scroll_id": "s1", "hits": {"hits": [{"_id": "2"}]}}
-    last_page = {"_scroll_id": "s1", "hits": {"hits": []}}
+    next_page = {"_scroll_id": "s2", "hits": {"hits": [{"_id": "2"}, {"_id": "3"}]}}
 
     with patch.object(
-        importer,
-        "get_vulnerabilities_for_group_of_agents_4_8_plus_page",
-        side_effect=[initial, next_page, last_page],
+        importer, "_get_scroll_page", side_effect=[first_page, next_page]
     ):
-        response = importer.get_vulnerabilities_for_group_of_agents_4_8_plus(
-            agent_ids=["001"]
+        result = importer.get_vulnerabilities_for_group_of_agents_4_8_plus(
+            agent_ids=["001"],
+            output_file=output_file,
         )
 
-    assert [hit["_id"] for hit in response["hits"]["hits"]] == ["1", "2"]
-    importer.opensearch_client.clear_scroll.assert_called_once_with(scroll_id="s1")
+    assert result == output_file
+    with open(output_file, encoding="utf-8") as f:
+        payload = json.load(f)
+    assert [hit["_id"] for hit in payload["hits"]["hits"]] == ["1", "2", "3"]
+    importer.opensearch_client.clear_scroll.assert_called_once_with(scroll_id="s2")
 
 
-def test_get_vulnerabilities_for_group_of_agents_4_8_plus_returns_immediately():
+def test_get_vulnerabilities_for_group_of_agents_4_8_plus_split_writes_chunks(tmp_path):
     importer = _make_importer(api_version="4.8.0")
     importer.opensearch_client = Mock()
-    response_payload = {
-        "_scroll_id": "s1",
-        "hits": {"total": {"value": 2}, "hits": [{"_id": "1"}, {"_id": "2"}]},
-    }
-    with patch.object(
-        importer,
-        "get_vulnerabilities_for_group_of_agents_4_8_plus_page",
-        return_value=response_payload,
-    ):
-        response = importer.get_vulnerabilities_for_group_of_agents_4_8_plus(
-            agent_ids=["001"]
+    importer.output_mode = "split"
+    output_file = tmp_path / "wazuh.json"
+
+    pages = [
+        {
+            "_scroll_id": "s1",
+            "hits": {"total": {"value": 3}, "hits": [{"_id": "1"}]},
+        },
+        {"_scroll_id": "s2", "hits": {"hits": [{"_id": "2"}]}},
+        {"_scroll_id": "s3", "hits": {"hits": []}},
+    ]
+
+    with patch.object(importer, "_get_scroll_page", side_effect=pages):
+        files = importer.get_vulnerabilities_for_group_of_agents_4_8_plus(
+            agent_ids=["001"],
+            output_file=output_file,
         )
 
-    assert response == response_payload
-    importer.opensearch_client.clear_scroll.assert_called_once_with(scroll_id="s1")
+    assert [p.name for p in files] == ["wazuh_0001.json", "wazuh_0002.json"]
+    with open(files[0], encoding="utf-8") as f:
+        assert json.load(f) == pages[0]
+    with open(files[1], encoding="utf-8") as f:
+        assert json.load(f) == pages[1]
+
+    importer.opensearch_client.clear_scroll.assert_called_once_with(scroll_id="s3")
 
 
 def test_chunked_and_chunk_output_path():
@@ -425,129 +441,8 @@ def test_write_json_file_writes_and_handles_errors(tmp_path):
     importer.logger.error.assert_called_once()
 
 
-def test_write_split_findings_pre_4_8_chunks_and_empty(tmp_path):
-    importer = _make_importer(api_version="4.7.0")
-    importer.DEFAULT_HITS_PER_FILE = 2
-    output_file = tmp_path / "wazuh.json"
-    vulnerabilities_list = {
-        "data": {
-            "affected_items": [{"id": "1"}, {"id": "2"}, {"id": "3"}],
-            "total_affected_items": 3,
-        }
-    }
-
-    files = importer._write_split_findings(output_file, vulnerabilities_list, "4.7.0")
-
-    assert [p.name for p in files] == ["wazuh_0001.json", "wazuh_0002.json"]
-    with open(files[0], encoding="utf-8") as f:
-        payload = json.load(f)
-        assert payload["data"]["total_affected_items"] == 3
-        assert len(payload["data"]["affected_items"]) == 2
-
-    vulnerabilities_list = {"data": {"affected_items": {"id": "nope"}}}
-    files = importer._write_split_findings(output_file, vulnerabilities_list, "4.7.0")
-    with open(files[0], encoding="utf-8") as f:
-        payload = json.load(f)
-        assert payload["data"]["affected_items"] == []
-
-
-def test_write_split_findings_4_8_plus_no_hits(tmp_path):
-    importer = _make_importer(api_version="4.8.0")
-    output_file = tmp_path / "wazuh.json"
-    files = importer._write_split_findings(output_file, {}, "4.8.0")
-
-    assert files == [output_file]
-    with open(output_file, encoding="utf-8") as f:
-        assert json.load(f) == {}
-
-
-def test_write_split_findings_4_8_plus_hits_not_list(tmp_path):
-    importer = _make_importer(api_version="4.8.0")
-    output_file = tmp_path / "wazuh.json"
-    payload = {"hits": {"hits": {"not": "a list"}}, "took": 1}
-    files = importer._write_split_findings(output_file, payload, "4.8.0")
-
-    assert files == [tmp_path / "wazuh_0001.json"]
-    with open(files[0], encoding="utf-8") as f:
-        assert json.load(f) == payload
-
-
-def test_write_split_findings_4_8_plus_chunking(tmp_path):
-    importer = _make_importer(api_version="4.8.0")
-    importer.DEFAULT_HITS_PER_FILE = 2
-    output_file = tmp_path / "wazuh.json"
-    payload = {
-        "took": 1,
-        "hits": {
-            "total": {"value": 3},
-            "hits": [{"_id": "1"}, {"_id": "2"}, {"_id": "3"}],
-        },
-    }
-    files = importer._write_split_findings(output_file, payload, "4.8.0")
-
-    assert [p.name for p in files] == ["wazuh_0001.json", "wazuh_0002.json"]
-    with open(files[0], encoding="utf-8") as f:
-        first = json.load(f)
-        assert first["took"] == 1
-        assert len(first["hits"]["hits"]) == 2
-        assert first["hits"]["total"]["value"] == 3
-
-
-def test_write_split_findings_streaming_empty_response(tmp_path):
-    importer = _make_importer(api_version="4.8.0")
-    importer.opensearch_client = Mock()
-    output_file = tmp_path / "wazuh.json"
-
-    with patch.object(
-        importer,
-        "get_vulnerabilities_for_group_of_agents_4_8_plus_page",
-        return_value={},
-    ):
-        files = importer._write_split_findings_streaming_4_8_plus(
-            output_file, agent_ids=["001"]
-        )
-
-    assert files == [output_file]
-    with open(output_file, encoding="utf-8") as f:
-        assert json.load(f) == {}
-
-
-def test_write_split_findings_streaming_chunking_and_clear_scroll(tmp_path):
-    importer = _make_importer(api_version="4.8.0")
-    importer.DEFAULT_HITS_PER_FILE = 2
-    importer.opensearch_client = Mock()
-    output_file = tmp_path / "wazuh.json"
-    responses = [
-        {
-            "_scroll_id": "s1",
-            "took": 1,
-            "hits": {"total": {"value": 3}, "hits": [{"_id": "1"}, {"_id": "2"}]},
-        },
-        {"_scroll_id": "s2", "took": 1, "hits": {"hits": [{"_id": "3"}]}},
-        {"_scroll_id": "s3", "took": 1, "hits": {"hits": []}},
-    ]
-
-    with patch.object(
-        importer,
-        "get_vulnerabilities_for_group_of_agents_4_8_plus_page",
-        side_effect=responses,
-    ):
-        files = importer._write_split_findings_streaming_4_8_plus(
-            output_file, agent_ids=["001"]
-        )
-
-    assert [p.name for p in files] == ["wazuh_0001.json", "wazuh_0002.json"]
-    with open(files[1], encoding="utf-8") as f:
-        payload = json.load(f)
-        assert len(payload["hits"]["hits"]) == 1
-        assert payload["hits"]["total"]["value"] == 3
-
-    importer.opensearch_client.clear_scroll.assert_called_once_with(scroll_id="s3")
-
-
 def test_get_findings_pre_4_8_filters_and_enriches(tmp_path):
     importer = _make_importer(api_version="4.7.0")
-    importer.output_mode = "single"
     group_agents = [
         {"id": "001", "ip": "1.1.1.1", "name": "host1"},
         {"id": "002", "ip": "1.1.1.2", "name": "host2"},
@@ -580,32 +475,16 @@ def test_get_findings_pre_4_8_filters_and_enriches(tmp_path):
     assert payload["data"]["affected_items"][0]["agent_name"] == "host1"
 
 
-def test_get_findings_pre_4_8_split_uses_split_writer(tmp_path):
-    importer = _make_importer(api_version="4.7.0")
-    importer.output_mode = "split"
-    sentinel = [tmp_path / "wazuh_0001.json"]
-
-    with (
-        patch.object(importer, "get_agents_in_group", return_value=[]),
-        patch.object(importer, "get_vulnerabilities_for_agent", return_value=None),
-        patch.object(importer, "_write_split_findings", return_value=sentinel) as mock,
-    ):
-        result = importer.get_findings("default", tmp_path)
-
-    assert result == sentinel
-    mock.assert_called_once()
-
-
-def test_get_findings_4_8_plus_split_uses_streaming_writer(tmp_path):
-    importer = _make_importer(api_version="4.8.0", output_mode="split")
-    sentinel = [tmp_path / "wazuh_0001.json"]
+def test_get_findings_4_8_plus_filters_agent_ids_and_delegates(tmp_path):
+    importer = _make_importer(api_version="4.8.0")
+    sentinel = tmp_path / "wazuh.json"
     agents = [{"id": "001"}, {"id": 2}]
 
     with (
         patch.object(importer, "get_agents_in_group", return_value=agents),
         patch.object(
             importer,
-            "_write_split_findings_streaming_4_8_plus",
+            "get_vulnerabilities_for_group_of_agents_4_8_plus",
             return_value=sentinel,
         ) as mock_writer,
     ):
@@ -613,24 +492,6 @@ def test_get_findings_4_8_plus_split_uses_streaming_writer(tmp_path):
 
     assert result == sentinel
     mock_writer.assert_called_once_with(
-        output_file=Path(tmp_path) / "wazuh.json", agent_ids=["001"]
+        agent_ids=["001"],
+        output_file=Path(tmp_path) / "wazuh.json",
     )
-
-
-def test_get_findings_4_8_plus_single_writes_payload(tmp_path):
-    importer = _make_importer(api_version="4.8.0")
-    importer.output_mode = "single"
-    payload = {"hits": {"total": {"value": 1}, "hits": [{"_id": "1"}]}}
-
-    with (
-        patch.object(importer, "get_agents_in_group", return_value=[{"id": "001"}]),
-        patch.object(
-            importer,
-            "get_vulnerabilities_for_group_of_agents_4_8_plus",
-            return_value=payload,
-        ),
-    ):
-        output_file = importer.get_findings("default", tmp_path)
-
-    with open(output_file, encoding="utf-8") as f:
-        assert json.load(f) == payload
