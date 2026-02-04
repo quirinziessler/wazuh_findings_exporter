@@ -174,11 +174,20 @@ class Wazuh_Importer(object):
 
             if response.status_code == 200:
                 data = response.json()
-                api_version = (
-                    data.get("data", {})
-                    .get("affected_items", [])[0]
-                    .get("version", None)
-                )
+                affected_items = data.get("data", {}).get("affected_items")
+                api_version = None
+
+                if isinstance(affected_items, list) and len(affected_items) > 0:
+                    first_item = affected_items[0]
+                    if isinstance(first_item, dict):
+                        api_version = first_item.get("version")
+
+                if api_version is None:
+                    self.logger.error(
+                        f"Failed to parse Wazuh API version from response: {data}"
+                    )
+                    return None
+
                 self.logger.info(f"Wazuh API version: {api_version}")
                 self.wazuh_api_version = api_version
                 return api_version
@@ -396,6 +405,19 @@ class Wazuh_Importer(object):
 
         return None
 
+    def _clear_the_scroll_index(self, scroll_id: str) -> None:
+        try:
+            self.logger.info("Clearing scroll index")
+            self.opensearch_client.clear_scroll(scroll_id=scroll_id)
+        except AuthenticationException:
+            self.logger.error("Received 401 Unauthorized.")
+        except RequestError as re:
+            self.logger.error(f"Received 400: {re}")
+        except Exception as e:
+            self.logger.error(
+                f"Unexpected error while clearing scroll '{scroll_id}': {e}"
+            )
+
     def get_vulnerabilities_for_group_of_agents_4_8_plus(
         self, agent_ids: Sequence[str]
     ) -> Dict[str, Any]:
@@ -431,12 +453,14 @@ class Wazuh_Importer(object):
                 f"Unexpected error while fetching group '{agent_ids}': {e}"
             )
 
-        if response["hits"]["total"]["value"] <= 10000:
+        total_hits = response["hits"]["total"]["value"]
+        scroll_id: str = response["_scroll_id"]
+
+        if total_hits <= 10000:
+            self._clear_the_scroll_index(scroll_id)
             return response
 
-        total_hits = response["hits"]["total"]["value"]
         self.logger.info(f"Total hits - {total_hits}. Start scrolling...")
-        scroll_id: str = response["_scroll_id"]
 
         while True:
             self.logger.info("Scrolling next 10000 hits")
@@ -446,6 +470,7 @@ class Wazuh_Importer(object):
                         agent_ids=agent_ids, scroll_id=scroll_id
                     )
                 )
+                scroll_id = scroll_response["_scroll_id"]
                 hits = scroll_response["hits"]["hits"]
                 if not hits:
                     self.logger.info("Ending scrolling")
@@ -463,17 +488,7 @@ class Wazuh_Importer(object):
                 )
                 break
 
-        try:
-            self.logger.info("Clearing scroll")
-            self.opensearch_client.clear_scroll(scroll_id=scroll_id)
-        except AuthenticationException:
-            self.logger.error("Received 401 Unauthorized.")
-        except RequestError as re:
-            self.logger.error(f"Received 400: {re}")
-        except Exception as e:
-            self.logger.error(
-                f"Unexpected error while clearing scroll '{scroll_id}': {e}"
-            )
+        self._clear_the_scroll_index(scroll_id)
 
         return response
 

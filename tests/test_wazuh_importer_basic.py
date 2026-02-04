@@ -92,7 +92,8 @@ def test_get_vulnerabilities_for_group_of_agents_4_8_plus():
     ):
         mock_client = Mock()
         mock_client.search.return_value = {
-            "hits": {"total": {"value": 2}, "hits": [{"_id": "1"}, {"_id": "2"}]}
+            "_scroll_id": "s1",
+            "hits": {"total": {"value": 2}, "hits": [{"_id": "1"}, {"_id": "2"}]},
         }
         mock_opensearch.return_value = mock_client
 
@@ -110,6 +111,7 @@ def test_get_vulnerabilities_for_group_of_agents_4_8_plus():
 
         assert response["hits"]["total"]["value"] == 2
         mock_client.search.assert_called_once()
+        mock_client.clear_scroll.assert_called_once_with(scroll_id="s1")
         search_kwargs = mock_client.search.call_args.kwargs
         assert search_kwargs["index"] == importer.elasticsearch_index
         assert search_kwargs["body"]["query"]["bool"]["must"][0]["terms"][

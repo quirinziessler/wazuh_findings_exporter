@@ -398,7 +398,7 @@ def test_get_vulnerabilities_for_group_of_agents_4_8_plus_returns_immediately():
         )
 
     assert response == response_payload
-    importer.opensearch_client.clear_scroll.assert_not_called()
+    importer.opensearch_client.clear_scroll.assert_called_once_with(scroll_id="s1")
 
 
 def test_chunked_and_chunk_output_path():
