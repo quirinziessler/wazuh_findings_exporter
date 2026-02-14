@@ -1,1 +1,1 @@
-from wazuh import Wazuh_Importer
+from .wazuh import Wazuh_Importer
