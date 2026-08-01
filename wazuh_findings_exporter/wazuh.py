@@ -1,23 +1,29 @@
 # Origin of this script: https://github.com/DefectDojo/django-DefectDojo/pull/8746
 
 
+import json
 import logging
+import warnings
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
 import requests
 import urllib3
-import json
-import warnings
-from opensearchpy.exceptions import AuthenticationException, RequestError
 from opensearchpy import OpenSearch
+from opensearchpy.exceptions import (
+    AuthenticationException,
+    OpenSearchException,
+    RequestError,
+)
+from packaging import version
 from requests.auth import HTTPBasicAuth
 from requests.exceptions import (
+    ConnectionError,
     ConnectTimeout,
     ReadTimeout,
-    ConnectionError,
     RequestException,
 )
-from typing import Optional, Dict, List, Any, Sequence, Union
-from packaging import version
-from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,10 +33,10 @@ logging.basicConfig(
 logging.captureWarnings(True)
 
 
-class Wazuh_Importer(object):
+class Wazuh_Importer:
     """API exporter for Wazuh."""
 
-    VALID_OUTPUT_MODES = {"single", "split"}
+    VALID_OUTPUT_MODES = frozenset({"single", "split"})
 
     def __init__(
         self,
@@ -45,7 +51,7 @@ class Wazuh_Importer(object):
         timeout: float = 10,
         elasticsearch_index: str = "wazuh-states-vulnerabilities-*",
         output_mode: str = "single",
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
         disable_insecure_request_warnings: bool = True,
     ) -> None:
         """
@@ -79,13 +85,13 @@ class Wazuh_Importer(object):
         self.OPENSEARCH_PASSWORD: str = OPENSEARCH_PASSWORD
         self.OPENSEARCH_HOST: str = OPENSEARCH_HOST
         self.OPENSEARCH_PORT: int = OPENSEARCH_PORT
-        self.HEADERS: Dict[str, str] = {}
+        self.HEADERS: dict[str, str] = {}
         self.verify: bool = verify
         self.timeout: float = timeout
         self.elasticsearch_index: str = elasticsearch_index
         self.output_mode: str = output_mode.strip().lower()
-        self.wazuh_api_version: Optional[str] = None
-        self.opensearch_client: Optional[OpenSearch] = None
+        self.wazuh_api_version: str | None = None
+        self.opensearch_client: OpenSearch | None = None
 
         if self.output_mode not in self.VALID_OUTPUT_MODES:
             self.logger.warning(
@@ -128,7 +134,7 @@ class Wazuh_Importer(object):
         )
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    def _get_api_version(self) -> Optional[str]:
+    def _get_api_version(self) -> str | None:
         """
         Retrieve the Wazuh API version from the manager endpoint.
 
@@ -182,8 +188,6 @@ class Wazuh_Importer(object):
 
         except (ConnectTimeout, ReadTimeout, ConnectionError, RequestException) as e:
             self.logger.error(f"Request error while fetching API version: {e}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error while fetching API version: {e}")
 
         return None
 
@@ -223,12 +227,10 @@ class Wazuh_Importer(object):
             self.logger.error(f"Connection error during authentication: {e}")
         except RequestException as e:
             self.logger.error(f"Request failed during authentication: {e}")
-        except Exception as e:
-            self.logger.error(f"Unexpected error during authentication: {e}")
 
         return False
 
-    def get_agents_in_group(self, group: str) -> List[Dict[str, Any]]:
+    def get_agents_in_group(self, group: str) -> list[dict[str, Any]]:
         """
         Retrieve all agents belonging to a specific group.
 
@@ -290,14 +292,10 @@ class Wazuh_Importer(object):
             self.logger.error(
                 f"Unexpected request error while fetching agents for group '{group}': {e}"
             )
-        except Exception as e:
-            self.logger.error(
-                f"Unexpected error while fetching agents for group '{group}': {e}"
-            )
 
         return []
 
-    def get_vulnerabilities_for_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def get_vulnerabilities_for_agent(self, agent_id: str) -> dict[str, Any] | None:
         """
         Retrieve vulnerabilities for a specific agent using the Wazuh API
         (Wazuh versions < 4.8).
@@ -371,18 +369,14 @@ class Wazuh_Importer(object):
             self.logger.error(
                 f"Unexpected request error while fetching vulnerabilities for agent '{agent_id}': {e}"
             )
-        except Exception as e:
-            self.logger.error(
-                f"Unexpected error while fetching vulnerabilities for agent '{agent_id}': {e}"
-            )
 
         return None
 
     def get_vulnerabilities_for_group_of_agents_4_8_plus(
         self,
         agent_ids: Sequence[str],
-        output_file: Optional[Path] = None,
-    ) -> Union[Path, List[Path]]:
+        output_file: Path | None = None,
+    ) -> Path | list[Path]:
         """
         Retrieve vulnerabilities for a group of agents using OpenSearch
         (Wazuh API >= 4.8).
@@ -409,10 +403,10 @@ class Wazuh_Importer(object):
             raise RuntimeError("OpenSearch client is not configured.")
 
         part_index = 1
-        total_hits: Optional[int] = None
+        total_hits: int | None = None
         seen_hits = 0
-        scroll_id: Optional[str] = None
-        output_files: List[Path] = []
+        scroll_id: str | None = None
+        output_files: list[Path] = []
 
         first_page = self._get_scroll_page(agent_ids=agent_ids)
 
@@ -460,7 +454,7 @@ class Wazuh_Importer(object):
                 page = self._get_scroll_page(scroll_id=scroll_id)
 
                 if not isinstance(page, dict):
-                    raise RuntimeError("Page is not a dict")
+                    raise TypeError("Page is not a dict")
 
                 scroll_id = page.get("_scroll_id", None)
                 if not scroll_id:
@@ -505,9 +499,9 @@ class Wazuh_Importer(object):
 
     def _get_scroll_page(
         self,
-        agent_ids: Optional[Sequence[str]] = None,
-        scroll_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        agent_ids: Sequence[str] | None = None,
+        scroll_id: str | None = None,
+    ) -> dict[str, Any]:
         """
         Retrieve a page of results from OpenSearch using either an initial search
         or a scroll request.
@@ -532,12 +526,12 @@ class Wazuh_Importer(object):
             raise RuntimeError("Received 401 Unauthorized.")
         except RequestError as re:
             raise RuntimeError(f"Received 400: {re}")
-        except Exception as e:
+        except OpenSearchException as e:
             raise RuntimeError(
                 f"Unexpected error while fetching group '{agent_ids}': {e}"
-            )
+            ) from e
 
-    def _opensearch_search_initial(self, agent_ids: Sequence[str]) -> Dict[str, Any]:
+    def _opensearch_search_initial(self, agent_ids: Sequence[str]) -> dict[str, Any]:
         if self.opensearch_client is None:
             raise RuntimeError("OpenSearch client is not configured.")
         query = {
@@ -557,12 +551,16 @@ class Wazuh_Importer(object):
             body=query, index=self.elasticsearch_index, scroll="1m", size=10000
         )
 
-    def _opensearch_scroll_next(self, scroll_id: str) -> Dict[str, Any]:
+    def _opensearch_scroll_next(self, scroll_id: str) -> dict[str, Any]:
         if self.opensearch_client is None:
             raise RuntimeError("OpenSearch client is not configured.")
         return self.opensearch_client.scroll(scroll_id=scroll_id, scroll="1m")
 
     def _clear_the_scroll_index(self, scroll_id: str) -> None:
+        if self.opensearch_client is None:
+            self.logger.error("OpenSearch client is not configured.")
+            return
+
         try:
             self.logger.info("Clearing scroll index")
             # TODO: Resolve error[unresolved-attribute]
@@ -571,7 +569,7 @@ class Wazuh_Importer(object):
             self.logger.error("Received 401 Unauthorized.")
         except RequestError as re:
             self.logger.error(f"Received 400: {re}")
-        except Exception as e:
+        except OpenSearchException as e:
             self.logger.error(
                 f"Unexpected error while clearing scroll '{scroll_id}': {e}"
             )
@@ -581,7 +579,7 @@ class Wazuh_Importer(object):
         suffix = output_file.suffix
         return output_file.with_name(f"{stem}_{part_index:04d}{suffix}")
 
-    def _write_json_file(self, output_file: Path, payload: Dict[str, Any]) -> None:
+    def _write_json_file(self, output_file: Path, payload: dict[str, Any]) -> None:
         try:
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
@@ -591,7 +589,7 @@ class Wazuh_Importer(object):
 
     def get_findings(
         self, group: str, filedestination: str, filename: str = "wazuh.json"
-    ) -> Union[Path, List[Path]]:
+    ) -> Path | list[Path]:
         """
         Retrieve vulnerabilities for all agents in a group and save to JSON.
 
@@ -612,7 +610,7 @@ class Wazuh_Importer(object):
         group_agents = self.get_agents_in_group(group)
 
         api_version = self.wazuh_api_version or "0.0.0"
-        vulnerabilities_list: Dict[str, Any]
+        vulnerabilities_list: dict[str, Any]
         if version.parse(api_version) < version.parse("4.8.0"):
             vulnerabilities_list = {"data": {"affected_items": []}}
             vulncount: int = 0
@@ -624,7 +622,7 @@ class Wazuh_Importer(object):
             }
 
             # Iterate over agents
-            for agent_id in group_agents_data:
+            for agent_id, agent_ip in group_agents_data.items():
                 vulnerabilities = self.get_vulnerabilities_for_agent(agent_id)
                 if not vulnerabilities:
                     continue
@@ -632,7 +630,7 @@ class Wazuh_Importer(object):
                 filtered_vulnerabilities = []
                 for vuln in vulnerabilities.get("data", {}).get("affected_items", []):
                     if vuln.get("condition") != "Package unfixed":
-                        vuln["agent_ip"] = group_agents_data[agent_id]
+                        vuln["agent_ip"] = agent_ip
                         vuln["agent_name"] = group_agents_name[agent_id]
                         filtered_vulnerabilities.append(vuln)
 
@@ -647,7 +645,7 @@ class Wazuh_Importer(object):
             return output_file
 
         else:
-            agent_ids: List[str] = []
+            agent_ids: list[str] = []
             for agent in group_agents:
                 agent_id = agent.get("id")
                 if isinstance(agent_id, str):
