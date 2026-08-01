@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 from requests.exceptions import (
-    ConnectTimeout,
     ConnectionError,
+    ConnectTimeout,
     ReadTimeout,
     RequestException,
 )

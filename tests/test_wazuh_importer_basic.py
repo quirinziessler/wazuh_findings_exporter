@@ -1,6 +1,7 @@
+import json
 from pathlib import Path
 from unittest.mock import Mock, patch
-import json
+
 import pytest
 
 from wazuh_findings_exporter.wazuh import Wazuh_Importer
