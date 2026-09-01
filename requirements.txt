@@ -1,4 +1,4 @@
 urllib3==2.7.0
 requests==2.34.2
 opensearch-py==3.2.0
-packaging==26.2
+packaging==26.3
